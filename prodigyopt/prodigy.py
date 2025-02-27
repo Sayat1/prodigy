@@ -65,8 +65,7 @@ class Prodigy(torch.optim.Optimizer):
                  slice_p=1,
                  factored=False,
                  eps2=1e-30,
-                 update_clip=None,
-                 only_use_unet=False):
+                 update_clip=None):
         if not 0.0 < d0:
             raise ValueError("Invalid d0 value: {}".format(d0))
         if not 0.0 < lr:
@@ -95,7 +94,6 @@ class Prodigy(torch.optim.Optimizer):
                         eps2=eps2,
                         update_clip=update_clip)
         self.d0 = d0
-        self.only_use_unet = only_use_unet
         super().__init__(params, defaults)
 
     @property
@@ -194,23 +192,13 @@ class Prodigy(torch.optim.Optimizer):
                 if 'step' not in state:
                     state['step'] = 0
 
-                    if self.only_use_unet:
-                        if self._is_unet(index):
-                            state['s'] = torch.zeros_like(p.data.flatten()[::slice_p]).detach()
+                    state['s'] = torch.zeros_like(p.data.flatten()[::slice_p]).detach()
 
-                            if p.any():
-                                state['p0'] = p.flatten()[::slice_p].detach().clone()
-                            else:
-                                # All values are zero, so save VRAM with a zero-tensor
-                                state['p0'] = torch.tensor(0, device=p.device, dtype=p.dtype)
+                    if p.any():
+                        state['p0'] = p.flatten()[::slice_p].detach().clone()
                     else:
-                        state['s'] = torch.zeros_like(p.data.flatten()[::slice_p]).detach()
-
-                        if p.any():
-                            state['p0'] = p.flatten()[::slice_p].detach().clone()
-                        else:
-                            # All values are zero, so save VRAM with a zero-tensor
-                            state['p0'] = torch.tensor(0, device=p.device, dtype=p.dtype)
+                        # All values are zero, so save VRAM with a zero-tensor
+                        state['p0'] = torch.tensor(0, device=p.device, dtype=p.dtype)
 
                     # Exponential moving average of gradient values
                     if beta1 > 0:
@@ -222,23 +210,12 @@ class Prodigy(torch.optim.Optimizer):
                         state["exp_avg_sq_row"] = torch.zeros(p.shape[:-1]).to(grad)
                         state["exp_avg_sq_col"] = torch.zeros(p.shape[:-2] + p.shape[-1:]).to(grad)
 
-                if self.only_use_unet:
-                    if self._is_unet(index):
-                        s = state['s']
-                        p0 = state['p0']
-                else:
-                    s = state['s']
-                    p0 = state['p0']
+                s = state['s']
+                p0 = state['p0']
 
                 if group_lr > 0.0:
-                    if self.only_use_unet:
-                        if self._is_unet(index):
-                        # we use d / d0 instead of just d to avoid getting values that are too small
-                            sliced_grad = grad.flatten()[::slice_p]
-                            delta_numerator += (d / d0) * dlr * torch.dot(sliced_grad, p0.data - p.data.flatten()[::slice_p]).item()
-                    else:
-                        sliced_grad = grad.flatten()[::slice_p]
-                        delta_numerator += (d / d0) * dlr * torch.dot(sliced_grad, p0.data - p.data.flatten()[::slice_p]).item()
+                    sliced_grad = grad.flatten()[::slice_p]
+                    delta_numerator += (d / d0) * dlr * torch.dot(sliced_grad, p0.data - p.data.flatten()[::slice_p]).item()
 
                     # Adam EMA updates
                     if beta1 > 0:
@@ -256,19 +233,11 @@ class Prodigy(torch.optim.Optimizer):
                         exp_avg_sq_row.mul_(beta2).add_(grad_sq.mean(dim=-1), alpha=d * d * (1-beta2)).add_(eps2)
                         exp_avg_sq_col.mul_(beta2).add_(grad_sq.mean(dim=-2), alpha=d * d * (1-beta2)).add_(eps2)
 
-                    if self.only_use_unet:
-                        if self._is_unet(index):
-                            if safeguard_warmup:
-                                s.mul_(beta3).add_(sliced_grad, alpha=((d / d0) * d))
-                            else:
-                                s.mul_(beta3).add_(sliced_grad, alpha=((d / d0) * dlr))
-                            d_denom += s.abs().sum().item()
+                    if safeguard_warmup:
+                        s.mul_(beta3).add_(sliced_grad, alpha=((d / d0) * d))
                     else:
-                        if safeguard_warmup:
-                            s.mul_(beta3).add_(sliced_grad, alpha=((d / d0) * d))
-                        else:
-                            s.mul_(beta3).add_(sliced_grad, alpha=((d / d0) * dlr))
-                        d_denom += s.abs().sum().item()
+                        s.mul_(beta3).add_(sliced_grad, alpha=((d / d0) * dlr))
+                    d_denom += s.abs().sum().item()
 
             ######
 
@@ -310,7 +279,6 @@ class Prodigy(torch.optim.Optimizer):
             factored = group['factored']
             update_clip = group['update_clip']
             beta1, beta2 = group['betas']
-            lr_scale = group['lr']/lr
 
 
             for p in group['params']:
@@ -333,15 +301,15 @@ class Prodigy(torch.optim.Optimizer):
 
                 # Apply weight decay (decoupled variant)
                 if decay != 0 and decouple:
-                    p.data.add_(p.data, alpha=-decay * dlr * lr_scale)
+                    p.data.add_(p.data, alpha=-decay * dlr)
 
                 ### Take step
                 if update_clip is None:
                     if beta1 > 0:
                         exp_avg = state['exp_avg']
-                        p.data.addcdiv_(exp_avg, denom, value=-dlr * lr_scale)
+                        p.data.addcdiv_(exp_avg, denom, value=-dlr)
                     else:
-                        p.data.addcdiv_(grad, denom, value=-dlr * d * lr_scale)
+                        p.data.addcdiv_(grad, denom, value=-dlr * d)
                 else:
                     if beta1 > 0:
                         exp_avg = state['exp_avg']
@@ -349,7 +317,7 @@ class Prodigy(torch.optim.Optimizer):
                     else:
                         update = grad.div(denom).mul_(d)
                     clip_div=(self._rms(update) / update_clip).clamp_(min=1.0)
-                    p.data.add_(update,alpha = -dlr / clip_div * lr_scale)
+                    p.data.add_(update,alpha = -dlr / clip_div)
 
 
             group['k'] = k + 1

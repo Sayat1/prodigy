@@ -165,7 +165,8 @@ class Prodigy_SPE_ADOPT(torch.optim.Optimizer):
             d_denom = 0.0
 
             d_max = group['d_max']
-
+            d = group['d']
+            d0 = group['d0']
             lr = group['lr']
             dlr = d*lr*bias_correction
             d_numerator = group['d_numerator']

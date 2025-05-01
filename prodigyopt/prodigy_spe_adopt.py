@@ -290,7 +290,7 @@ class Prodigy_SPE_ADOPT(torch.optim.Optimizer):
             for p in group['params']:
                 if p.grad is None:
                     continue
-                grad = p.grad
+                grad = p.grad.data
 
                 state = self.state[p]
                 state['step'] += 1
@@ -301,7 +301,7 @@ class Prodigy_SPE_ADOPT(torch.optim.Optimizer):
 
                 if not factored or len(p.shape) < 2:
                     exp_avg_sq = state['exp_avg_sq']
-                    if group['step'] == 1:
+                    if state['step'] == 1:
                         exp_avg_sq.addcmul_(grad, grad.conj())
                         continue
                     denom = exp_avg_sq.sqrt().clamp_(min=group['eps'])
@@ -312,7 +312,7 @@ class Prodigy_SPE_ADOPT(torch.optim.Optimizer):
 
                 normed_grad = grad.div(denom)
                 if self.clip_lambda is not None:
-                    clip = self.clip_lambda(group['step'])
+                    clip = self.clip_lambda(state['step'])
                     normed_grad.clamp_(-clip, clip)
 
                 if beta1 > 0:
@@ -322,7 +322,7 @@ class Prodigy_SPE_ADOPT(torch.optim.Optimizer):
                 if update_clip is not None:
                     dlr /= self.get_stable_adamw_rms(grad, exp_avg_sq, update_clip)
 
-                p.add_(exp_avg, alpha=-dlr)
+                p.data.add_(exp_avg, alpha=-dlr)
 
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1.0 - beta2)
 

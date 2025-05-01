@@ -13,7 +13,7 @@ else:
     _params_t = Any
 
 
-class Prodigy_SPE(torch.optim.Optimizer):
+class Prodigy_SPE_ADOPT(torch.optim.Optimizer):
     r"""
     Implements Adam with Prodigy step-sizes.
     Leave LR set to 1 unless you encounter instability.
@@ -65,6 +65,7 @@ class Prodigy_SPE(torch.optim.Optimizer):
                  slice_p=1,
                  factored=False,
                  eps2=1e-30,
+                 clip_lambda: Callable[[float], float] = lambda step: math.pow(step, 0.25),
                  update_clip=None):
         if not 0.0 < d0:
             raise ValueError("Invalid d0 value: {}".format(d0))
@@ -94,6 +95,7 @@ class Prodigy_SPE(torch.optim.Optimizer):
                         eps2=eps2,
                         update_clip=update_clip)
         self.d0 = d0
+        self.clip_lambda = clip_lambda
         super().__init__(params, defaults)
 
     @property
@@ -113,6 +115,16 @@ class Prodigy_SPE(torch.optim.Optimizer):
     @staticmethod
     def _rms(tensor):
         return torch.linalg.norm(tensor) / (tensor.numel() ** 0.5)
+    
+    @staticmethod
+    def get_stable_adamw_rms(grad: torch.Tensor, exp_avg_sq: torch.Tensor, update_clip=1.0, eps: float = 1e-16) -> float:
+        r"""Get StableAdamW RMS.
+
+        :param grad: torch.Tensor. gradient.
+        :param exp_avg_sq: torch.Tensor. exp_avg_sq.
+        :param eps: float. epsilon.
+        """
+        return grad.pow(2).div_(exp_avg_sq.clip(min=eps)).mean().sqrt_().clip_(min=update_clip).item()
 
     def step(self, closure=None):
         """Performs a single optimization step.
@@ -277,40 +289,41 @@ class Prodigy_SPE(torch.optim.Optimizer):
             for p in group['params']:
                 if p.grad is None:
                     continue
-                grad = p.grad.data
+                grad = p.grad
 
                 state = self.state[p]
                 state['step'] += 1
-
-                if not factored or len(p.shape) < 2:
-                    exp_avg_sq = state['exp_avg_sq']
-                    denom = exp_avg_sq.sqrt()
-                else:
-                    exp_avg_sq_row = state["exp_avg_sq_row"]
-                    exp_avg_sq_col = state["exp_avg_sq_col"]
-                    denom = self._approx_sqrt(exp_avg_sq_row, exp_avg_sq_col)
-
-                denom.add_(d * eps)
 
                 # Apply weight decay (decoupled variant)
                 if decay != 0 and decouple:
                     p.data.add_(p.data, alpha=-decay * dlr)
 
-                ### Take step
-                if update_clip is None:
-                    if beta1 > 0:
-                        exp_avg = state['exp_avg']
-                        p.data.addcdiv_(exp_avg, denom, value=-dlr)
-                    else:
-                        p.data.addcdiv_(grad, denom, value=-dlr * d)
+                if not factored or len(p.shape) < 2:
+                    exp_avg_sq = state['exp_avg_sq']
+                    if group['step'] == 1:
+                        exp_avg_sq.addcmul_(grad, grad.conj())
+                        continue
+                    denom = exp_avg_sq.sqrt().clamp_(min=group['eps'])
                 else:
-                    if beta1 > 0:
-                        exp_avg = state['exp_avg']
-                        update = exp_avg.div(denom)
-                    else:
-                        update = grad.div(denom).mul_(d)
-                    clip_div=(self._rms(update) / update_clip).clamp_(min=1.0)
-                    p.data.add_(update,alpha = -dlr / clip_div)
+                    exp_avg_sq_row = state["exp_avg_sq_row"]
+                    exp_avg_sq_col = state["exp_avg_sq_col"]
+                    denom = self._approx_sqrt(exp_avg_sq_row, exp_avg_sq_col)
+
+                normed_grad = grad.div(denom)
+                if self.clip_lambda is not None:
+                    clip = self.clip_lambda(group['step'])
+                    normed_grad.clamp_(-clip, clip)
+
+                if beta1 > 0:
+                    exp_avg = state['exp_avg']
+                    exp_avg.lerp_(normed_grad, weight=1.0 - beta1)
+
+                if update_clip is not None:
+                    dlr /= self.get_stable_adamw_rms(grad, exp_avg_sq, update_clip)
+
+                p.add_(exp_avg, alpha=-dlr)
+
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1.0 - beta2)
 
             group['k'] = k + 1
 

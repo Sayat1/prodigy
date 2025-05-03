@@ -213,6 +213,7 @@ class Prodigy_SPE_DK(torch.optim.Optimizer):
                     delta_numerator += (d / d0) * dlr * torch.dot(sliced_grad, p0.data - p.data.flatten()[::slice_p]).item()
                     d_k = group['d_prev'] / group['d']
                     d_k2 = d_k ** 2 
+                    group['d_k'] = d_k
 
                     # Adam EMA updates
                     if beta1 > 0:

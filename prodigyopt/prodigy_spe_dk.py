@@ -307,7 +307,8 @@ class Prodigy_SPE_DK(torch.optim.Optimizer):
                         exp_avg = state['exp_avg']
                         p.data.addcdiv_(exp_avg, denom, value=-dlr)
                     else:
-                        p.data.addcdiv_(grad, denom, value=-dlr * d)
+                        update = grad.div(denom).mul_(d)
+                        p.data.addcdiv_(update, denom, value=-dlr * d)
                 else:
                     if beta1 > 0:
                         exp_avg = state['exp_avg']

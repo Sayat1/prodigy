@@ -85,7 +85,7 @@ class Prodigy_SPE(torch.optim.Optimizer):
                         eps=eps, weight_decay=weight_decay,
                         d=d0, d0=d0, d_max=d0,
                         d_numerator=0.0, d_coef=d_coef,
-                        k=0,d_k=1, growth_rate=growth_rate,
+                        k=0, growth_rate=growth_rate,
                         use_bias_correction=use_bias_correction,
                         decouple=decouple, safeguard_warmup=safeguard_warmup,
                         fsdp_in_use=fsdp_in_use,
@@ -176,6 +176,8 @@ class Prodigy_SPE(torch.optim.Optimizer):
                     fsdp_in_use = True
                
                 grad = p.grad.data
+                if grad.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.float()
                
                 # Apply weight decay (coupled variant)
                 if decay != 0 and not decouple:
